@@ -2,7 +2,9 @@
 .gitignore
 .dockerignore
 README.md
+VERTEX_SMOKE_TEST.md
 Makefile
-summary.md
-aggregation.sql
+.env
+.env.*
 **/__pycache__
+**/*.pyc

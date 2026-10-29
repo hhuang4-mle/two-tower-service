@@ -1,186 +1,149 @@
-# EmbeddingGemma Vertex AI batch prediction
+# EmbeddingGemma-300m inference contract
 
-This project runs a BigQuery-to-BigQuery embedding workflow with
-`google/embeddinggemma-300m`. It uses a custom Vertex AI prediction container
-for GPU inference and a separate batch job runner for orchestration.
+The predictor loads the complete saved EmbeddingGemma-300m Sentence
+Transformers artifact and serves inference for Vertex AI batch prediction.
+Vertex, not this application, reads BigQuery inputs and writes raw predictions.
+Preprocessing, deduplication, joins, retries, and publication belong to the
+future full Vertex AI Pipeline. The copied Cloud Run runner and its commands
+are preserved in [`pipeline/legacy/`](../pipeline/legacy/README.md).
 
-## How to run the pipeline
+## Build and layout
 
-### Recommended: run the Cloud Run job
+This directory is inference-only: `app.py`, `Dockerfile`, dependencies,
+Cloud Build configuration, and these documents. Run `make build` or
+`make push` from this directory. Override `PROJECT_ID`, `IMAGE_NAME`, or
+`IMAGE_TAG` as needed.
 
-The main customer-test entry point is:
+The full pipeline will be implemented in [`pipeline/`](../pipeline/README.md).
+Legacy execution commands now run from `pipeline/legacy/`, not here.
 
-```bash
-make run-customer-test-cloud-run
+## Input and output
+
+`POST /predict` accepts named text instances:
+
+```json
+{"instances": [{"text": "Product description"}, {"text": ""}]}
 ```
 
-This target deploys the existing batch job image, applies the configured
-customer-test tables and columns, and executes the Cloud Run Job. The default
-task timeout is 20 hours; override it when necessary:
+For compatibility with the proven BigQuery workflow, it also retains raw
+instance lists, JSON-encoded objects, and singleton-list wrappers. For example:
 
-```bash
-CLOUD_RUN_TASK_TIMEOUT=12h make run-customer-test-cloud-run
+```json
+{"instances": [["{\"text\":\"Product description\"}"]]}
 ```
 
-Cloud Run task retries are disabled (`--max-retries=0`) to prevent a failed
-runner attempt from automatically submitting another Vertex AI batch job.
-A failed execution requires manual recovery. Vertex's internal request retries
-are unaffected. This does not prevent duplicate manual or scheduled executions,
-and stopping the runner does not cancel an already submitted Vertex job.
+Each `text` must be a string. Empty and whitespace-only strings are accepted.
+NULL normalization and deduplication must happen upstream. The predictor does
+not modify text itself; preprocessing inside the saved model/tokenizer remains
+part of the training contract.
 
-Before running it, authenticate with Google Cloud and make sure the caller and
-the Cloud Run runtime service account can access the configured BigQuery
-tables, Vertex AI, the serving image, and the pre-configured model artifacts:
+The existing response schema is unchanged:
 
-```bash
-gcloud auth application-default login
-gcloud config set project gcp-wow-rwds-ai-super-plo-dev
+```json
+{"predictions": [[0.0123, -0.0456], [0.0234, 0.0567]]}
 ```
 
-The customer-test Makefile parameters are:
+The example vectors are shortened. Each instance has one finite, nonzero
+vector in request order, converted to FP32 before serialization. An empty
+request returns `{"predictions": []}` without model inference.
 
-| Parameter | Default | Description |
-| --- | --- | --- |
-| `CUSTOMER_TEST_SOURCE_TABLE` | `gcp-wow-rwds-ai-super-plo-dev.two_tower.super_long_term_customer_text_small` | Fully qualified BigQuery table containing the source records to embed. |
-| `CUSTOMER_TEST_TEXT_COLUMN` | `customer_embedding_text` | Column containing the text that is sent to the embedding model. |
-| `CUSTOMER_TEST_INPUT_TABLE` | `gcp-wow-rwds-ai-super-plo-dev.two_tower.customer_embedding_input_test` | Fully qualified BigQuery table created or replaced with the serialized Vertex AI batch-prediction input instances. |
-| `CUSTOMER_TEST_RESULT_TABLE` | `gcp-wow-rwds-ai-super-plo-dev.two_tower.super_long_term_customer_text_small_d768` | Fully qualified BigQuery table receiving every original source column and row, plus an `embedding` array. |
+Assume 768 dimensions for this pipeline. Do not enforce 768 in the predictor:
+retain positive-integer `parameters.truncate_dim` overrides and the
+`TRUNCATE_DIM` environment setting, defaulting to 768. Other dimensions remain
+supported; callers are responsible for downstream compatibility.
 
-`INPUT_TABLE` is a temporary staging table for Vertex AI batch prediction. It
-contains one JSON instance, `{"text": "..."}`, per distinct model-input string
-from `TEXT_COLUMN`. Null text becomes an empty string for inference only.
-Empty strings and whitespace-only strings are embedded, not excluded; no other
-trimming, case folding, or text normalization is applied.
+Vertex must preserve original input text in its BigQuery prediction output for
+joins. The predictor does not echo text or IDs. Do not join batch output by row
+order. Verify both the existing serialized-input format and the future named
+object format using the [Vertex smoke procedure](VERTEX_SMOKE_TEST.md).
 
-Predictions are joined back by that same text expression. `RESULT_TABLE`
-preserves every original row and column, including duplicate rows and null
-values, and appends `embedding` as `ARRAY<FLOAT64>`. Null and empty-string text
-share the empty-string embedding; their original text values stay unchanged.
-No ID column is required, and `ID_COLUMN` / `CUSTOMER_TEST_ID_COLUMN` have been
-removed.
+## Model and tokenization
 
-Before replacing the result table, the workflow rejects duplicate, unexpected,
-or invalid predictions and checks that the row count is preserved. If Vertex
-reports success but some texts have no prediction, the result is still
-published: affected rows have `embedding = []`. The Cloud Run runner logs a
-warning with the missing distinct-text count and affected source-row count.
-Failed, cancelled, or expired Vertex jobs still stop before postprocessing.
-An entirely empty source skips
-inference and produces an empty result table with the embedding column.
-`input_rows` now counts distinct model inputs, while `result_rows` counts all
-source rows.
+Require `modules.json` and load the complete saved artifact, retaining its
+pooling, dense, and normalization modules. Do not reconstruct a bare model.
+Load locally downloaded weights on CUDA in BF16, set `eval()`, and use
+inference mode. Do not substitute FP16.
 
-Keep the source table unchanged until the job finishes, and use separate
-staging/result table names for overlapping runs. Use a source snapshot if
-writers cannot be paused. The source should not already contain an `embedding`
-column; write results to a separate table.
+Use `encode(prompt="")` to prevent saved default/document prompts from being
+added. As agreed, keep `normalize_embeddings=True` from the copied predictor,
+in addition to any normalization module saved in the artifact.
 
-To run against different tables or columns:
+Set the tokenizer sequence limit to **at most 2,048 tokens including special
+tokens, not bytes or characters**. Retain a smaller saved limit if present.
+Oversized text is truncated from the right, retaining the beginning. Do not
+slice characters or decode/re-encode tokens. Training must use the same
+prompt, normalization, and truncation conventions.
 
-```bash
-make run-customer-test-cloud-run \
-  CUSTOMER_TEST_SOURCE_TABLE=gcp-wow-rwds-ai-super-plo-dev.two_tower.super_long_term_customer_text_small \
-  CUSTOMER_TEST_TEXT_COLUMN=description \
-  CUSTOMER_TEST_INPUT_TABLE=gcp-wow-rwds-ai-super-plo-dev.two_tower.customer_embedding_input \
-  CUSTOMER_TEST_RESULT_TABLE=gcp-wow-rwds-ai-super-plo-dev.two_tower.super_long_term_customer_text_small_d768
-```
+Keep the original untruncated text as the BigQuery join key. Different source
+texts can have identical truncated token inputs without becoming the same key.
 
-### Run from the Cloud Run web console
+## Failures and readiness
 
-Open the [EmbeddingGemma batch job in the Cloud Run
-console](https://console.cloud.google.com/run/jobs/details/us-central1/embeddinggemma-batch-job-runner/executions?project=gcp-wow-rwds-ai-super-plo-dev)
+| Condition | Behavior |
+|---|---|
+| Invalid JSON, instance/text type, parameters, or non-positive/non-integer dimension | HTTP 400 before inference; no source text in error messages. |
+| Oversized text | Tokenizer truncation and normal inference, not rejection. |
+| Unloaded model | HTTP 503 for health and prediction. |
+| Artifact, configuration, or model initialization failure | Startup fails; no successful readiness. |
+| Inference failure, malformed/incomplete output, non-finite or zero vector | HTTP 500 for the request; do not return partial vectors or placeholders. |
+| Missing prediction in Vertex output | Future pipeline reconciles staged keys and Vertex errors; predictor does not fabricate a vector. |
 
-to start and monitor the job:
+`GET /health` returns 200 only after initialization succeeds. Failures are
+request-wide; isolating records and retrying keys belongs to the pipeline.
+The copied runner's existing `embedding=[]` partial-publication behavior is
+not the future pipeline contract.
 
-1. Open **Cloud Run > Jobs** and select `embeddinggemma-batch-job-runner`. (Or open the linked above)
-2. Click **Execute** or **Execute with overrides**.
-3. In **Container(s) > Variables & secrets**, set the runtime variables:
-   `SOURCE_TABLE`, `TEXT_COLUMN`, `INPUT_TABLE`, and
-   `RESULT_TABLE`.
-4. Click **Execute** and monitor the execution in the job details page.
+## Logical BigQuery boundaries
 
-![Cloud Run Job web console](docs/screenshots/cloud_run_job_1.png)
+These are contracts for future pipeline implementation, not deployed schemas.
+BigQuery source identifier types must be inspected and preserved.
 
-![Cloud Run Job web console](docs/screenshots/cloud_run_job_2.png)
+| Boundary | Logical fields |
+|---|---|
+| Customer source | `crn`, `long_term_user_text STRING`, `mid_term_user_text STRING` |
+| Product source | `article_nbr`, `product_text STRING` |
+| Encoder input | `text STRING NOT NULL`, one row per distinct normalized text |
+| Reconciled encoder output | `text STRING NOT NULL`, `embedding ARRAY<FLOAT64>` representing 768 finite FP32 values |
+| Customer projection input | Both normalized customer texts and ordered `user_vectors [2, 768]` |
+| Product projection input | Normalized `product_text` and `item_vectors [768]` |
+| Final customer output | `crn`, both normalized texts, `embedding [128]` |
+| Final product output | `article_nbr`, normalized `product_text`, `embedding [128]` |
 
-In the web console, use the runtime variable names rather than the
-`CUSTOMER_TEST_*` Makefile names. The overrides apply only to that execution
-and do not change the saved job configuration. The runtime service account
-must have access to all specified BigQuery resources. Executing with overrides
-requires the **Cloud Run Developer** role on the job; see the
-[Cloud Run job execution documentation](https://cloud.google.com/run/docs/execute/jobs).
+The existing input physically stores a JSON string in `instances`; retain that
+format until the named-field `text` input with Vertex `instanceType="object"`
+is verified. Final embeddings use BigQuery `ARRAY<FLOAT64>`. The customer
+matrix needs a verified array-of-struct or JSON representation because
+BigQuery does not support arrays of arrays directly.
 
-### Run locally
+Normalize NULL/missing text to `""`; otherwise compare text exactly without
+trimming or case folding. Customer runs deduplicate across both text fields.
+Customer projection keys are ordered long-term/mid-term text pairs; product
+keys are product texts. Final joins preserve all successful source rows and
+their multiplicity, even when IDs repeat.
 
-For local execution, use:
+The future failure table has logical fields `stage STRING`,
+`error_code STRING`, `attempt INT64`, safe `message STRING`, and source mapping: the
+original identifier plus relevant normalized text fields. Define physical
+customer/product schemas after confirming identifier types. Map encoder
+failures to every dependent source row.
 
-```bash
-python3 -m pip install -r batch_job_runner/requirements.txt
-make run-customer-test
-```
-
-The runner prepares the BigQuery input table, submits and waits for the Vertex
-AI batch prediction, then writes the final output to
-`CUSTOMER_TEST_RESULT_TABLE`.
+Retry failed/incomplete keys for at most two rounds after the initial attempt.
+Publish available successes and remaining failures separately, not fabricated
+vectors. Keep temporary tables by default; optional cleanup follows
+reconciliation. Disable data-dependent caching for mutable tables.
 
 ## Configuration
 
-The default configuration targets project
-`gcp-wow-rwds-ai-super-plo-dev`, Vertex AI location `us-central1`, and the
-following pre-configured resources:
+| Setting | Meaning |
+|---|---|
+| `AIP_STORAGE_URI` | Vertex-provided GCS saved-artifact prefix. |
+| `ENCODER_BATCH_SIZE` | Positive microbatch limit, default 32; separate from Vertex request batching. |
+| `TRUNCATE_DIM` | Positive default output dimension truncation, default 768. |
+| Model registration | `/predict`, `/health`, port 8080, explicit artifact and image versions. |
+| Future pipeline | Explicit project, Vertex region, compatible BigQuery location, table names, separate encoder/projection model resources, pipeline root, and execution service account. |
 
-- Serving image:
-  `gcr.io/gcp-wow-rwds-ai-super-plo-dev/text-embedding-batch-prediction`
-- Cloud Run Job:
-  `embeddinggemma-batch-job-runner`
-- Output dataset:
-  `gcp-wow-rwds-ai-super-plo-dev.two_tower`
-
-Common overrides include `PROJECT_ID`, `LOCATION`, `SOURCE_TABLE`, `TEXT_COLUMN`,
-`INPUT_TABLE`, `OUTPUT_DATASET`, `RESULT_TABLE`, `MODEL_RESOURCE_NAME`,
-`MODEL_ARTIFACT_URI`, and `SERVING_CONTAINER_IMAGE_URI`.
-
-## Container builds (already done)
-
-Rebuild and publish the batch job runner image to deploy changes to the shared
-workflow, then deploy the updated Cloud Run job. The distinct-text change does
-not require rebuilding the prediction image. The existing build targets are:
-
-```bash
-# Vertex AI prediction image
-make build
-make push
-
-# Cloud Run batch job image
-make build-batch-job-runner
-make push-batch-job-runner
-```
-
-## Passing `truncate_dim`
-
-For online prediction requests, pass `truncate_dim` under the `parameters`
-object:
-
-```json
-{
-  "instances": [
-    { "text": "Product description text..." }
-  ],
-  "parameters": {
-    "truncate_dim": 256
-  }
-}
-```
-
-For BigQuery batch prediction, Vertex AI sends only the `instances` payload.
-Set `TRUNCATE_DIM` when running the batch job runner to configure the model
-during registration:
-
-```bash
-TRUNCATE_DIM=256 \
-  PYTHONPATH=shared python3 batch_job_runner/run_batch_prediction.py
-```
-
-Changing `TRUNCATE_DIM` for an existing `MODEL_RESOURCE_NAME` requires
-registering a new model because model environment variables are fixed at
-upload time.
+The architecture's intended artifact is
+`gs://wx-1b759ae5-bd00-4de8-bf4d-427baa30e931/fs/text-embedding-models/embeddinggemma-300m/`.
+The copied registration tooling has different defaults; supply overrides until
+it is migrated. Resource existence, IAM, dataset locations, physical output
+schemas, and training compatibility remain cloud verification prerequisites.

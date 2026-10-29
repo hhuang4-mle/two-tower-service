@@ -1,6 +1,8 @@
 # Two-tower embedding and recommendation services
 
-Status: design draft. No service is implemented yet.
+Status: design draft. The text predictor has initial inference-contract
+updates; Vertex smoke validation is pending. The full pipeline, projection
+service, and recommendation API are not implemented.
 
 ## Goal
 
@@ -152,14 +154,24 @@ and compatible BigQuery dataset locations must be verified before deployment.
 ## Model and precision contract
 
 Use the complete saved Sentence Transformers artifact, including its pooling
-and normalization modules, with no added prompt or extra normalization.
+and normalization modules, with no added prompt. Keep
+`normalize_embeddings=True` from the copied predictor as agreed, in addition
+to any saved normalization module.
 Ensure the encoding API does not silently add a default prompt. The model
 version, tokenizer, pooling, normalization, and preprocessing used in
 training must match inference.
 
-Inputs are assumed to fit EmbeddingGemma's 2,048-token limit, including
-special tokens. Unexpectedly oversized inputs must not be silently truncated;
-the exact error handling needs to be specified.
+Truncate oversized text with the saved model's tokenizer from the right,
+retaining the beginning within at most 2,048 tokens including special tokens,
+not bytes or characters. Keep a smaller saved sequence limit if present.
+Preserve original text as the pipeline join key; do not deduplicate by
+truncated tokens. Training must use the same truncation convention.
+
+The text inference and logical pipeline data/failure contracts are defined in
+[`batch_text_embedding/README.md`](batch_text_embedding/README.md).
+The pipeline assumes 768-dimensional base embeddings. The predictor retains
+its existing output-dimension options without enforcing 768; pipeline/model
+configuration must select compatible dimensions.
 
 Mid-term text may be `""`. Pass it to EmbeddingGemma as empty text rather than
 substituting an all-zero vector. Its embedding will normally be nonzero, so the
@@ -280,7 +292,7 @@ mechanics of per-key retry with an end-to-end job.
 2. Expected data volumes, text lengths, schedule, completion target, and
    projection batch size.
 3. Artifact versions, checkpoint format, IAM, container configuration, and
-   oversized-input handling.
+   training/inference compatibility of tokenizer truncation and normalization.
 4. Vertex-specific output schemas, error reporting, retry implementation, and
    warning/monitoring destinations.
 5. Pipeline component selection, service accounts, task/job timeout and

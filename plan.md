@@ -1,8 +1,10 @@
 # Copied text-embedding migration plan
 
-Status: planned, not implemented. This plan is separate from the copied
-project's documentation. No existing code, commands, or deployment behavior
-changes as part of creating this file.
+Status: initial contracts and predictor changes implemented; Vertex smoke
+validation pending. This plan remains separate from the copied project's
+documentation. Full-pipeline migration and Cloud Run cutover remain deferred.
+The predictor is now isolated in `batch_text_embedding/`; copied workflow
+material is preserved under `pipeline/legacy/`.
 
 ## Goal and boundaries
 
@@ -21,22 +23,29 @@ replace Cloud Run Job orchestration, not Vertex AI batch inference.
 
 ## Current starting point
 
-The copied predictor is already separate from the workflow runner. Its
-Dockerfile copies only the predictor application and requirements; the
-separation work primarily concerns orchestration, project layout, entry
-points, and inference-contract alignment.
+The predictor is now an independently buildable application. Its Dockerfile
+copies only its application and requirements. The legacy runner, shared code,
+SQL, text-only pipeline, and original documentation have been moved together
+so their relative imports and runner build context are preserved.
 
 | Existing location | Migration use |
 |---|---|
-| `batch_text_embedding/predictor/` | Starting point for the independent text-embedding image. |
-| `batch_text_embedding/shared/embedding_workflow/util.py` | Source of existing preprocessing, model registration, batch submission/polling, postprocessing, and cleanup logic. |
-| `batch_text_embedding/batch_job_runner/` | Current Cloud Run orchestration entry point; retire after pipeline validation and cutover. |
-| `batch_text_embedding/vertex_pipeline/` | Existing text-only pipeline, submission tooling, SQL, and compiled YAML to adapt, not a complete two-tower pipeline. |
-| `batch_text_embedding/Makefile` | Existing build and Cloud Run commands to retain until replacement commands are validated. |
+| `batch_text_embedding/` | Independent text-embedding image, build/push commands, and inference contract. |
+| `pipeline/legacy/shared/embedding_workflow/util.py` | Existing preprocessing, model registration, batch submission/polling, postprocessing, and cleanup logic to migrate. |
+| `pipeline/legacy/batch_job_runner/` | Current Cloud Run orchestration entry point; retire after pipeline validation and cutover. |
+| `pipeline/legacy/vertex_pipeline/` | Existing text-only pipeline, submission tooling, SQL, and compiled YAML to adapt. |
+| `pipeline/legacy/Makefile` | Preserved Cloud Run and runner commands; predictor build/push targets forward to its new directory. |
+| `pipeline/` | Reserved for the future full pipeline; currently documented by a README only. |
+| `batch_projection/` | Placeholder README for the future projection image. |
 
 ## Migration steps
 
 ### 1. Define pipeline contracts and configuration
+
+Initial contracts are in
+[`batch_text_embedding/README.md`](batch_text_embedding/README.md). Physical
+Vertex/BigQuery schemas, identifier types, resources, and IAM still require
+deployment verification.
 
 Specify customer and product source schemas, staging tables, prediction/error
 schemas, and final publication mechanics before moving workflow logic.
@@ -54,7 +63,7 @@ service accounts, and IAM rather than inheriting copied defaults.
 ### 2. Make text embedding an inference-only application
 
 Retain artifact loading, readiness, prediction-request validation,
-tokenization, and model inference in `predictor/`. Do not move these
+tokenization, and model inference in `batch_text_embedding/`. Do not move these
 model-local operations into BigQuery preprocessing.
 
 Keep BigQuery preparation, deduplication, source-row reconstruction, batch-job
@@ -64,15 +73,24 @@ text-embedding application.
 
 Audit the copied predictor against the target model contract before reuse:
 768-dimensional outputs, the complete saved Sentence Transformers artifact,
-no added prompt or extra normalization, BF16 encoder inference, and FP32
-vectors for projection. Review the current `encode_document`,
+no added prompt, retained `normalize_embeddings=True`, BF16 encoder inference,
+and FP32 vectors for projection. Review the current `encode_document`,
 `normalize_embeddings`, and `TRUNCATE_DIM` behavior rather than assuming it
-matches training. Define oversized-input handling without silent truncation.
+matches training. As agreed, truncate oversized inputs with the saved
+tokenizer to at most 2,048 tokens including special tokens; retain original
+text join keys. Assume 768 dimensions for the pipeline without rejecting
+other predictor dimension options.
+
+The existing predictor has been updated accordingly without changing its
+BigQuery-compatible request formats or response schema. Cloud-only validation
+is documented in
+[`VERTEX_SMOKE_TEST.md`](batch_text_embedding/VERTEX_SMOKE_TEST.md)
+for the user to run; no smoke jobs have been submitted.
 
 ### 3. Adapt preprocessing into explicit pipeline steps
 
 Reuse compatible logic from `preprocess_input()` and
-`vertex_pipeline/sql/preprocess.sql` rather than maintaining two independent
+`pipeline/legacy/vertex_pipeline/sql/preprocess.sql` rather than maintaining two independent
 implementations.
 
 Prepare distinct text inputs in BigQuery before starting the encoder job.
@@ -114,7 +132,7 @@ names could otherwise reuse stale results.
 ### 5. Adapt postprocessing and failure handling
 
 Reuse compatible validation and join logic from `postprocess_output()` and
-`vertex_pipeline/sql/postprocess.sql`, but do not copy the existing
+`pipeline/legacy/vertex_pipeline/sql/postprocess.sql`, but do not copy the existing
 `embedding = []` publication behavior into the final output contract.
 
 Validate finite 768-dimensional intermediate vectors. Validate final vectors
@@ -167,5 +185,6 @@ The text-embedding application owns inference only. The full Vertex AI
 Pipeline owns all batch preprocessing and postprocessing and coordinates both
 independently packaged model images. Customer and product end-to-end checks
 pass, no Cloud Run orchestration image is required, and the API remains a
-placeholder. Existing code and commands stay unchanged until these migration
-steps are implemented.
+placeholder. Existing Cloud Run orchestration behavior is preserved under
+`pipeline/legacy/` until pipeline migration and cutover are implemented and
+validated.

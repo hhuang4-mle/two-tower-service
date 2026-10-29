@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+README.md
+summary.md
+Makefile
+docs/
+vertex_pipeline/
+**/__pycache__
+**/*.pyc

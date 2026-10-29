@@ -89,7 +89,7 @@ An example value in the `instances` column is:
 
 ### 3. Build and publish the serving container
 
-The predictor container is built from `predictor/Dockerfile` and pushed to Artifact
+The predictor container is built from `../../batch_text_embedding/Dockerfile` and pushed to Artifact
 Registry. It uses a CUDA 12.1 Python 3.10 base image and runs the FastAPI
 application with Uvicorn on the Vertex AI HTTP port.
 
@@ -145,7 +145,7 @@ raw predictions. Postprocessing writes the configured result table.
 
 ## Serving container implementation
 
-The serving container is implemented in `predictor/app.py`. It is a FastAPI application
+The serving container is implemented in `../../batch_text_embedding/app.py`. It is a FastAPI application
 that implements the Vertex AI custom prediction container contract.
 
 ### Model initialization

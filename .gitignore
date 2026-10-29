@@ -34,7 +34,8 @@ application_default_credentials.json
 *.onnx
 
 # Compiled pipeline specification
-/batch_text_embedding/vertex_pipeline/embedding_pipeline.yaml
+/pipeline/legacy/vertex_pipeline/embedding_pipeline.yaml
+/pipeline/embedding_pipeline.yaml
 
 # OS metadata and logs
 .DS_Store

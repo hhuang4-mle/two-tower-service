@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import torch
 from fastapi import FastAPI, HTTPException, Request
 from google.cloud import storage
 from sentence_transformers import SentenceTransformer
@@ -13,6 +14,9 @@ from sentence_transformers import SentenceTransformer
 
 model: SentenceTransformer | None = None
 MODEL_DIR = Path("/tmp/model")
+MAX_SEQUENCE_LENGTH = 2048
+encoder_batch_size = 32
+default_truncate_dim = 768
 
 
 def download_model_artifacts(uri: str, destination: Path) -> None:
@@ -44,16 +48,37 @@ def download_model_artifacts(uri: str, destination: Path) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global model
+    global model, encoder_batch_size, default_truncate_dim
 
+    model = None
+    encoder_batch_size = int(os.environ.get("ENCODER_BATCH_SIZE", "32"))
+    default_truncate_dim = int(os.environ.get("TRUNCATE_DIM", "768"))
+    if encoder_batch_size <= 0 or default_truncate_dim <= 0:
+        raise ValueError("ENCODER_BATCH_SIZE and TRUNCATE_DIM must be positive integers")
     download_model_artifacts(os.environ["AIP_STORAGE_URI"], MODEL_DIR)
-    model = SentenceTransformer(
+    if not (MODEL_DIR / "modules.json").is_file():
+        raise FileNotFoundError("Expected a complete saved Sentence Transformers artifact")
+    loaded_model = SentenceTransformer(
         str(MODEL_DIR),
         device="cuda",
         trust_remote_code=True,
+        local_files_only=True,
+        model_kwargs={"torch_dtype": torch.bfloat16},
     )
-    yield
-    model = None
+    loaded_model.max_seq_length = min(loaded_model.max_seq_length, MAX_SEQUENCE_LENGTH)
+    loaded_model.tokenizer.truncation_side = "right"
+    loaded_model.eval()
+    logging.getLogger("uvicorn.error").info(
+        "EmbeddingGemma ready: dtype=%s, max_seq_length=%d tokens, microbatch_size=%d",
+        next(loaded_model.parameters()).dtype,
+        loaded_model.max_seq_length,
+        encoder_batch_size,
+    )
+    model = loaded_model
+    try:
+        yield
+    finally:
+        model = None
 
 
 class HealthCheckLogFilter(logging.Filter):
@@ -88,13 +113,13 @@ def parse_instance(instance: Any, index: int) -> dict[str, Any]:
         except json.JSONDecodeError as error:
             raise HTTPException(
                 status_code=400,
-                detail=f"instances[{index}] must be a JSON object with a string 'text' field. - json.loads() error. {instance}",
+                detail=f"instances[{index}] must be a JSON object with a string 'text' field.",
             ) from error
 
     if not isinstance(instance, dict) or not isinstance(instance.get("text"), str):
         raise HTTPException(
             status_code=400,
-            detail=f"instances[{index}] must be a JSON object with a string 'text' field. - instance error. - {type(instance)} - {instance}",
+            detail=f"instances[{index}] must be a JSON object with a string 'text' field.",
         )
     return instance
 
@@ -121,7 +146,6 @@ async def predict(request: Request) -> dict[str, list[list[float]]]:
             status_code=400,
             detail="'parameters' must be a JSON object.",
         )
-    default_truncate_dim = int(os.environ.get("TRUNCATE_DIM", "768"))
     truncate_dim = parameters.get("truncate_dim", default_truncate_dim)
     if isinstance(truncate_dim, bool) or not isinstance(truncate_dim, int) or truncate_dim <= 0:
         raise HTTPException(
@@ -137,18 +161,35 @@ async def predict(request: Request) -> dict[str, list[list[float]]]:
     parsed_instances = [
         parse_instance(instance, index) for index, instance in enumerate(instances)
     ]
+    if not parsed_instances:
+        return {"predictions": []}
 
-    embeddings = model.encode_document(
-        [instance["text"] for instance in parsed_instances],
-        batch_size=32,
-        truncate_dim=truncate_dim,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-    )
+    try:
+        with torch.inference_mode():
+            embeddings = model.encode(
+                [instance["text"] for instance in parsed_instances],
+                prompt="",
+                batch_size=encoder_batch_size,
+                truncate_dim=truncate_dim,
+                normalize_embeddings=True,
+                convert_to_tensor=True,
+                show_progress_bar=False,
+            ).float().cpu()
+        if (
+            embeddings.ndim != 2
+            or embeddings.shape[0] != len(parsed_instances)
+            or embeddings.shape[1] == 0
+            or not torch.isfinite(embeddings).all()
+            or (torch.linalg.vector_norm(embeddings, dim=1) == 0).any()
+        ):
+            raise HTTPException(
+                status_code=500, detail="Model returned invalid embeddings."
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=500, detail="Text embedding inference failed."
+        ) from None
 
-    return {
-        "predictions": [
-            embedding.tolist() for embedding in embeddings
-        ]
-    }
+    return {"predictions": embeddings.tolist()}

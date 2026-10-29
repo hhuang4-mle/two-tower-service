@@ -4,10 +4,10 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
 
-COPY predictor/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY predictor/app.py .
+COPY app.py .
 
 EXPOSE 8080
 

@@ -5,7 +5,7 @@ steps:
       - --platform
       - linux/amd64
       - --file
-      - predictor/Dockerfile
+      - Dockerfile
       - --tag
       - $_IMAGE_URI
       - .
