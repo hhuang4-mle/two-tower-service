@@ -1,0 +1,14 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --platform
+      - linux/amd64
+      - --file
+      - batch_job_runner/Dockerfile
+      - --tag
+      - $_IMAGE_URI
+      - .
+
+images:
+  - $_IMAGE_URI

@@ -1,0 +1,8 @@
+.git
+.gitignore
+.dockerignore
+README.md
+Makefile
+summary.md
+aggregation.sql
+**/__pycache__

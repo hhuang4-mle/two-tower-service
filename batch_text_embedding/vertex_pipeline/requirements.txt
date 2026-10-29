@@ -1,0 +1,4 @@
+kfp==2.7.0
+google-cloud-aiplatform==1.93.0
+google-cloud-bigquery==3.31.0
+google-cloud-pipeline-components==2.22.0

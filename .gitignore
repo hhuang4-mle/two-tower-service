@@ -1,0 +1,42 @@
+# Python environments and generated files
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+.credentials/
+application_default_credentials.json
+*.pem
+*.key
+
+# Local model artifacts
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Compiled pipeline specification
+/batch_text_embedding/vertex_pipeline/embedding_pipeline.yaml
+
+# OS metadata and logs
+.DS_Store
+._*
+*.log
