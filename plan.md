@@ -2,7 +2,9 @@
 
 Status: the standalone text-embedding implementation and Vertex AI batch
 smoke test are complete. The user reported a successful test on 2026-10-30.
-Full-pipeline implementation and Cloud Run cutover are not complete.
+The encoder-only pipeline is implemented and compiles; its cloud execution
+has not yet been validated. Full two-stage integration and Cloud Run cutover
+are not complete.
 
 ## Progress and next milestone
 
@@ -10,29 +12,153 @@ Full-pipeline implementation and Cloud Run cutover are not complete.
 |---|---|---|
 | 1. Contracts and configuration | Partially complete | Logical contracts defined and serialized BigQuery smoke path validated; confirm real customer/product schemas, physical projection/failure schemas, and pipeline configuration. |
 | 2. Inference-only text embedding | Complete for the initial milestone | Independent image, model registration, and BigQuery-to-BigQuery Vertex smoke test successful. |
-| 3. Pipeline preprocessing | Next | Implement source normalization/deduplication and staging SQL, followed by projection-input assembly. |
-| 4. Full Vertex AI Pipeline | Not started | Implement orchestration and integrate both model stages. |
-| 5. Postprocessing and failures | Not started | Implement reconciliation, selective retries, failure mapping, publication, and cleanup. |
+| 3. Pipeline preprocessing | Implemented; cloud validation pending | Verify normalization, cross-field deduplication, and staging with real BigQuery fixtures. |
+| 4. Full Vertex AI Pipeline | Encoder-only implementation complete | Validate the initial pipeline in Vertex; add projection when ready. |
+| 5. Postprocessing and failures | Encoder-only implementation complete | Validate reconciliation, retries, source mapping, transactional publication, and cleanup in BigQuery/Vertex. |
 | 6. End-to-end validation | Partially complete | Standalone encoder smoke test passed; full customer/product pipelines and failure paths remain unvalidated. |
 | 7. Cutover | Partially complete | Directory separation and build paths complete; replace and retire legacy execution only after full-pipeline validation. |
 
-**Start next with Step 3**, first resolving the source/staging details still
-open in Step 1:
+**Next: validate the new encoder-only pipeline in Vertex**, first supplying
+the source and submission settings still open in Step 1:
 
-1. Confirm real customer/product table names, identifier types, text columns,
-   BigQuery locations, and staging/output configuration.
-2. Implement BigQuery preprocessing under `pipeline/sql/`: normalize NULL
-   texts, deduplicate across both customer fields within a run, and stage
-   distinct encoder inputs while preserving source-row mappings.
-3. Validate that SQL with small fixtures and connect preparation plus the
-   registered encoder to an initial Vertex AI Pipeline.
-4. Add projection-input assembly and the remaining stages as the independent
-   projection image and checkpoint loader become available.
+1. Confirm real customer/product source schemas and text columns, BigQuery
+   locations, model resource, and submission settings. Preserve source
+   identifier types automatically and derive staging/output names.
+2. Follow [`pipeline/README.md`](pipeline/README.md) to submit small customer
+   and product runs, initially with one replica.
+3. Validate deduplication, mapping, retries, failures, empty inputs, source-lock
+   behavior, and `_d768` publication. No local model downloads are required;
+   no test suite was added, as requested.
+4. Integrate neural-network projection later, when its image and checkpoint
+   loader are available.
 
 The projection service is still a placeholder. Implementing its supplied
 two-tower head, fail-closed checkpoint loading, and independent image is a
-prerequisite for completing Steps 4 and 6. Confirm trained-checkpoint
-availability before production integration.
+prerequisite for the full two-stage scope of Steps 4 and 6, but not for the
+initial text-embedding pipeline below. Confirm trained-checkpoint availability
+before production integration.
+
+## Agreed initial pipeline: text embedding and source mapping
+
+One parameterized Vertex AI Pipeline definition is now implemented. Launch customer
+and product encoding as separate runs with different parameters; they may
+execute concurrently without waiting for one another. Do not require the
+projection model or load it in this initial pipeline.
+
+### Execution steps
+
+1. Read the customer or product source table.
+2. Normalize NULL text to `""` and deduplicate exact texts. Customer runs
+   combine both text columns before deduplication; retain the original
+   long-term/mid-term ordering for later mapping.
+3. Run the registered EmbeddingGemma model with Vertex batch prediction to
+   produce 768-dimensional text embeddings.
+4. Validate and reconcile predictions against staged text keys. Check
+   dimensions, finite/nonzero values, missing/error records, duplicates, and
+   unexpected keys. Retry failed/incomplete keys for at most two rounds after
+   the initial attempt; report unresolved failures separately.
+5. Join validated embeddings back to the original source: twice for customer
+   long-term/mid-term fields, once for product text. Preserve source-row
+   multiplicity; do not join or deduplicate by customer/product ID.
+6. Publish projection-ready `_d768` output and source-row failures. Publish a
+   customer row only when both embeddings are valid, and a product row only
+   when its embedding is valid. Keep intermediate tables by default.
+
+Stop after this mapping/publication step. The future projection stage will
+stack customer embeddings in long-term, mid-term order and generate
+128-dimensional vectors. It is not part of this initial implementation.
+
+### Required run parameters
+
+| Parameter | Meaning |
+|---|---|
+| `entity_type` | `customer` or `product`. |
+| `source_table` | Fully qualified `project.dataset.table` source. |
+| `text_columns` | Customer: ordered `[long_term_column, mid_term_column]`; product: `[product_text_column]`. Source column names are configurable. |
+| `embedding_model_resource_name` | Exact registered Vertex model resource, not its display name. |
+
+No `id_column` is required. IDs are not sent to the encoder or used as
+embedding join keys. Preserve all original source columns, including any
+identifiers, in the mapped output and source-row failure reports.
+
+No output, failure, or staging table/dataset parameter is required for this
+initial design. Derive them from `source_table` in its existing dataset.
+
+### Configuration and submission settings
+
+| Setting | Default or requirement |
+|---|---|
+| `project_id` | `gcp-wow-rwds-ai-super-plo-dev`. |
+| `vertex_location` | `us-central1`. |
+| `bigquery_location` | Explicit location compatible with the source dataset and Vertex region. |
+| `request_batch_size` | `32`. |
+| `replica_count` | `4`, configurable for quota/cost; initially use the same starting and maximum count. |
+| Compute | `g2-standard-4`, one NVIDIA L4 per replica. |
+| `retry_rounds` | `2` after the initial attempt. |
+| `cleanup_intermediates` | `false`; cleanup only after reconciliation when enabled. |
+| Submission | Configure a GCS pipeline root. Execution account defaults to `super-plo-dev@gcp-wow-rwds-ai-super-plo-dev.iam.gserviceaccount.com`, is overridable, and is also passed to the batch container. |
+
+The registered model already references its image and GCS artifacts; those
+URIs are not pipeline run inputs. Disable data-dependent caching for mutable
+tables. Keep source data unchanged throughout the run so final joins use the
+same text relationships as preprocessing.
+
+### Derived BigQuery table names
+
+All tables use the source project/dataset. Here `<source>` means the fully
+qualified source table and `<run_id>` is generated automatically with a
+BigQuery-safe, unique value.
+
+| Purpose | Derived name |
+|---|---|
+| Mapped output | `<source>_d768` |
+| Unresolved source-row failures | `<source>_d768_failures` |
+| Distinct encoder input | `<source>_d768_input_<run_id>` |
+| Validated distinct-text embeddings | `<source>_d768_embeddings_<run_id>` |
+| Batch-job manifest | `<source>_d768_jobs_<run_id>` |
+| Exclusive source lock | `<source>_d768_lock` |
+
+For example, `project.dataset.customer_text` publishes to
+`project.dataset.customer_text_d768`. Vertex generates its own raw prediction
+and error table names; record those names rather than assuming or renaming
+them.
+
+Unique intermediate names isolate concurrent customer/product runs. Prevent
+overlapping runs for the same source because their fixed output/failure names
+would collide. An atomically created lock table now rejects overlapping runs.
+Publication replaces output and failure rows together in a BigQuery
+transaction. Cloud validation is pending. See the pipeline README for stale
+lock recovery and the unchanged-source requirement.
+
+### Published output schemas
+
+Preserve every original source column and value, including original NULL text
+and identifier types; use NULL-normalized text expressions only for joins.
+Append these standard embedding columns regardless of configured text-column
+names:
+
+| Entity | Appended columns |
+|---|---|
+| Customer | `long_term_embedding ARRAY<FLOAT64>`, `mid_term_embedding ARRAY<FLOAT64>` |
+| Product | `product_embedding ARRAY<FLOAT64>` |
+
+Each embedding contains 768 values representing FP32 model output. Reject
+source schemas that already use the appended embedding column names rather
+than silently overwriting source data.
+
+The distinct-text intermediate table contains normalized `text STRING` and
+`embedding ARRAY<FLOAT64>`; both customer text fields share this one table.
+Mapping joins it twice, so customers do not require two text-embedding tables.
+Failure output must identify the affected original source rows and failed
+text field(s), with safe error details, without substituting empty or zero
+vectors. The implemented schema contains `source_record JSON`,
+`failed_fields ARRAY<STRING>`, `stage`, `error_code`, `attempts`, and `message`.
+Raw output/error diagnostics remain accessible through the recorded jobs.
+
+These are 768-dimensional intermediate outputs for future projection, not the
+final 128-dimensional tables in `ARCHITECTURE.md`. Preserving all source
+columns supersedes the earlier strict standardized source-field output
+proposal for this initial stage only.
 
 ## Goal and boundaries
 
@@ -63,7 +189,7 @@ so their relative imports and runner build context are preserved.
 | `pipeline/legacy/batch_job_runner/` | Current Cloud Run orchestration entry point; retire after pipeline validation and cutover. |
 | `pipeline/legacy/vertex_pipeline/` | Existing text-only pipeline, submission tooling, SQL, and compiled YAML to adapt. |
 | `pipeline/legacy/Makefile` | Preserved Cloud Run and runner commands; predictor build/push targets forward to its new directory. |
-| `pipeline/` | Reserved for the future full pipeline; currently documented by a README only. |
+| `pipeline/` | Implemented encoder-only graph, lightweight SDK components, SQL, submission tooling, Makefile, and README; full two-stage integration is deferred. |
 | `batch_projection/` | Placeholder README for the future projection image. |
 
 ## Migration steps
@@ -79,9 +205,10 @@ Vertex. Real customer/product schemas, identifier types, physical projection
 and failure schemas, and full-pipeline resources/IAM remain to be confirmed;
 the smoke result does not verify every production configuration.
 
-Specify customer and product source schemas, staging tables, prediction/error
-schemas, and final publication mechanics before moving workflow logic.
-Keep customer-only and product-only runs independent.
+Confirm actual source schemas, prediction/error schemas, and publication
+mechanics using the initial pipeline contract above. Derive destination names
+instead of requesting them from the user. Customer/product runs share one
+pipeline definition but execute independently.
 
 Use the existing architecture's contracts: normalize NULL/missing text to
 `""`, otherwise compare text exactly, and deduplicate individual texts across
@@ -124,7 +251,7 @@ training-vector quality acceptance.
 
 ### 3. Adapt preprocessing into explicit pipeline steps
 
-Status: next; not implemented.
+Status: implemented in `pipeline/sql/prepare.sql`; cloud validation pending.
 
 Reuse compatible logic from `preprocess_input()` and
 `pipeline/legacy/vertex_pipeline/sql/preprocess.sql` rather than maintaining
@@ -132,17 +259,20 @@ two independent implementations. Put the new SQL under `pipeline/sql/`,
 outside the predictor and legacy directories.
 
 Prepare distinct text inputs in BigQuery before starting the encoder job.
-After reconciling encoder predictions, construct distinct ordered customer
-embedding pairs or product embedding inputs for the projection job.
+After reconciling encoder predictions, map them to all original source columns
+and publish the agreed projection-ready `_d768` output. Neural-network input
+assembly and distinct customer-pair projection remain future work.
 Keep the empty-text embedding convention; do not substitute zero vectors.
 
 ### 4. Construct the full Vertex AI Pipeline
 
-Status: not started; `pipeline/README.md` is a placeholder for the new
-implementation. The preserved text-only legacy graph is not this pipeline.
+Status: initial encoder-only graph and submission tooling implemented and
+compiled successfully. Full two-stage integration and cloud validation remain
+pending. The preserved legacy graph is separate.
 
 Adapt the copied text-only graph into a full pipeline with separately visible
-steps:
+steps. First implement the agreed encoder-only flow above; defer the
+projection job until its model is ready. The eventual full flow is:
 
 ```text
 Prepare and deduplicate source texts in BigQuery
@@ -157,8 +287,8 @@ Add selective retry paths for failed/incomplete keys at each model stage.
 Use managed BigQuery and Vertex components where suitable; do not introduce a
 fourth application image or put orchestration in the API.
 
-Use named-field Vertex inputs and retain text keys in prediction outputs.
-The serialized encoder path passed the smoke test. Separately verify
+Retain the proven serialized encoder input format for the initial pipeline,
+and keep text keys in prediction outputs. Separately verify
 named-field input and the projection/error schemas as they are integrated;
 do not infer those results from the encoder smoke test or rely on row order.
 Align copied compute settings with the architecture: initially four
@@ -174,7 +304,8 @@ names could otherwise reuse stale results.
 
 ### 5. Adapt postprocessing and failure handling
 
-Status: not started.
+Status: encoder reconciliation, selective retries, mapped publication, source
+locking, and optional staging cleanup implemented; cloud validation pending.
 
 Reuse compatible validation and join logic from `postprocess_output()` and
 `pipeline/legacy/vertex_pipeline/sql/postprocess.sql`, but do not copy the
@@ -184,6 +315,11 @@ Validate finite 768-dimensional intermediate vectors. Validate final vectors
 as finite, 128-dimensional, and unit length within `1e-4`; exclude zero or
 invalid final vectors. Reconcile missing, failed, duplicate, and unexpected
 predictions and map failures to affected source records.
+
+For the initial pipeline, publish mapped 768-dimensional outputs and failures
+using the derived names above; retain all source columns and require both
+customer embeddings before publishing that source row. The 128-dimensional
+checks apply only after future projection integration.
 
 Retry failed/incomplete keys for up to two rounds after the initial attempt,
 reducing batches or isolating records when necessary. Surface model-loading
@@ -198,8 +334,9 @@ Avoid logging raw customer text.
 ### 6. Validate before replacing the current entry point
 
 Status: partially complete. The standalone encoder's Vertex smoke test passed.
-Full-pipeline validation, projection integration, named-field input, and
-negative/error-path results are not established by that report.
+The new encoder-only pipeline compiles and its Make commands have been
+dry-run. Its cloud execution, projection integration, named-field input, and
+negative/error-path results are not established by those checks.
 
 Add focused SQL checks and cloud validation for deduplication,
 NULL/empty/whitespace text, ordered customer pairs, duplicate source rows,
