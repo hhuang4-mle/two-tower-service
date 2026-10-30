@@ -1,5 +1,5 @@
 PROJECT_ID ?= gcp-wow-rwds-ai-super-plo-dev
-IMAGE_NAME ?= text-embedding-batch-prediction
+IMAGE_NAME ?= embeddinggemma-300m-bf16
 IMAGE_TAG ?= latest
 IMAGE_URI := gcr.io/$(PROJECT_ID)/$(IMAGE_NAME):$(IMAGE_TAG)
 

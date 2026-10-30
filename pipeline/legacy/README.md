@@ -145,7 +145,7 @@ The default configuration targets project
 following pre-configured resources:
 
 - Serving image:
-  `gcr.io/gcp-wow-rwds-ai-super-plo-dev/text-embedding-batch-prediction`
+  `gcr.io/gcp-wow-rwds-ai-super-plo-dev/embeddinggemma-300m-bf16`
 - Cloud Run Job:
   `embeddinggemma-batch-job-runner`
 - Output dataset:

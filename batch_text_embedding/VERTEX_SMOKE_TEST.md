@@ -1,80 +1,48 @@
-# Vertex AI BigQuery smoke test
+# Run an EmbeddingGemma batch example
 
-Status: procedure prepared, not executed. No local model downloads or local
-inference tests are required. These commands create billable cloud resources
-when you run them. Use synthetic text only, an isolated image/model and a new
-dataset; do not overwrite existing models, jobs, or production tables.
+1. Build and push the Docker image.
+2. Register the model in Vertex AI.
+3. Prepare a small BigQuery input table.
+4. Submit a batch prediction job.
+5. Check the job and predictions.
 
-Prerequisites: authenticated `gcloud`, `bq`, `curl`, `make`, Cloud Build and
-Vertex APIs enabled, L4 quota in `us-central1`, and approved access to the
-image registry and saved GCS artifacts. The caller and relevant Vertex service
-agents need the appropriate image, artifact, and BigQuery permissions.
-Verify that your BigQuery location is supported with the Vertex region.
+**No online endpoint deployment or Cloud Run Job is needed.** Vertex starts
+the GPU containers for the batch job. The full Vertex AI Pipeline comes later.
 
-Run the shell commands in the same shell from `batch_text_embedding/`.
+Before starting, authenticate `gcloud` and `bq`, enable Cloud Build and Vertex
+AI, and confirm L4 quota and image/GCS/BigQuery permissions. The example uses
+`us-central1` and a BigQuery `US` dataset; verify location compatibility.
+Running these commands creates billable resources. This procedure has not yet
+been executed.
 
-## 1. Build a separate image in Cloud Build
+Run all commands in the same shell from `batch_text_embedding/`.
+
+## 1. Build and push the image
+
+Use a unique tag so the test cannot accidentally reuse an older image:
 
 ```bash
 export PROJECT_ID=gcp-wow-rwds-ai-super-plo-dev
 export LOCATION=us-central1
-export BQ_LOCATION=US
 export RUN_ID=embedding_smoke_$(date -u +%Y%m%d_%H%M%S)
-export IMAGE_NAME=text-embedding-batch-prediction
-export IMAGE_URI=gcr.io/$PROJECT_ID/$IMAGE_NAME:$RUN_ID
-export ARTIFACT_URI=gs://wx-1b759ae5-bd00-4de8-bf4d-427baa30e931/fs/text-embedding-models/embeddinggemma-300m/
-export SMOKE_DATASET=$RUN_ID
+export IMAGE_URI=gcr.io/$PROJECT_ID/embeddinggemma-300m-bf16:$RUN_ID
+export ARTIFACT_URI=gs://wx-e1710759-2e30-40b2-a876-11588a57cb50/text-embedding-models/embeddinggemma-300m
+export DATASET=$RUN_ID
 
-make push PROJECT_ID="$PROJECT_ID" IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$RUN_ID"
+make push PROJECT_ID="$PROJECT_ID" IMAGE_TAG="$RUN_ID"
 ```
 
-This uses the existing Cloud Build target; it does not deploy or execute the
-Cloud Run Job. Check that the build succeeds and publishes the new image.
-The artifact must be the full saved Sentence Transformers directory,
-including `modules.json`, tokenizer, pooling/dense modules, and weights.
+`make push` builds and publishes the image through Cloud Build; no local
+Docker build or model download is required.
 
-## 2. Create synthetic BigQuery fixtures
+## 2. Register the model
 
-```bash
-bq --project_id="$PROJECT_ID" mk --dataset --location="$BQ_LOCATION" \
-  "$PROJECT_ID:$SMOKE_DATASET"
-
-bq --project_id="$PROJECT_ID" --location="$BQ_LOCATION" query --use_legacy_sql=false <<SQL
-CREATE TABLE \`$PROJECT_ID.$SMOKE_DATASET.source\` AS
-SELECT text FROM UNNEST([
-  'Milk bread eggs',
-  'Milk bread eggs',
-  '',
-  CAST(NULL AS STRING),
-  '   ',
-  CODE_POINTS_TO_STRING([19990, 30028]),
-  REPEAT(CONCAT(CODE_POINTS_TO_STRING([19990, 30028]), ' '), 400),
-  CONCAT(REPEAT('milk ', 4096), 'tail alpha'),
-  CONCAT(REPEAT('milk ', 4096), 'tail beta')
-]) AS text;
-
-CREATE TABLE \`$PROJECT_ID.$SMOKE_DATASET.legacy_input\` AS
-SELECT TO_JSON_STRING(STRUCT(COALESCE(text, '') AS text)) AS instances
-FROM \`$PROJECT_ID.$SMOKE_DATASET.source\`;
-
-CREATE TABLE \`$PROJECT_ID.$SMOKE_DATASET.object_input\` AS
-SELECT COALESCE(text, '') AS text
-FROM \`$PROJECT_ID.$SMOKE_DATASET.source\`;
-SQL
-```
-
-There are nine rows. Duplicates are deliberately retained to check prediction
-multiplicity; deduplication is a future pipeline responsibility. NULL becomes
-empty text upstream. The two oversized texts have different original keys
-but share the token prefix retained after truncation. The Unicode cases guard
-against treating byte counts as token counts.
-
-## 3. Register a new model explicitly
+Link the new image to the model artifacts already in GCS:
 
 ```bash
 gcloud ai models upload \
   --project="$PROJECT_ID" --region="$LOCATION" \
-  --model-id="$RUN_ID" --display-name="$RUN_ID" \
+  --model-id="$RUN_ID" --display-name=embeddinggemma-300m-bf16 \
   --artifact-uri="$ARTIFACT_URI" \
   --container-image-uri="$IMAGE_URI" \
   --container-predict-route=/predict \
@@ -85,10 +53,40 @@ gcloud ai models upload \
 export MODEL_RESOURCE_NAME=projects/$PROJECT_ID/locations/$LOCATION/models/$RUN_ID
 ```
 
-Do not let the copied runner auto-select an existing model by display name:
-that could reuse the old image instead of exercising these changes.
+The display name is `embeddinggemma-300m-bf16`; the unique resource ID isolates
+this test from existing models. The artifact must include the complete saved
+Sentence Transformers model, including `modules.json` and tokenizer files.
 
-## 4. Test the proven serialized BigQuery format first
+## 3. Prepare BigQuery input
+
+Create a separate test dataset and six input rows: ordinary text, a duplicate,
+empty text, NULL normalized to empty text, Unicode, and oversized text.
+Use the serialized `instances` format supported by the copied workflow:
+
+```bash
+bq --project_id="$PROJECT_ID" mk --dataset --location=US \
+  "$PROJECT_ID:$DATASET"
+
+bq --project_id="$PROJECT_ID" --location=US query --use_legacy_sql=false <<SQL
+CREATE TABLE \`$PROJECT_ID.$DATASET.input\` AS
+SELECT TO_JSON_STRING(STRUCT(COALESCE(text, '') AS text)) AS instances
+FROM UNNEST([
+  'Milk bread eggs',
+  'Milk bread eggs',
+  '',
+  CAST(NULL AS STRING),
+  CODE_POINTS_TO_STRING([19990, 30028]),
+  REPEAT('milk ', 4096)
+]) AS text;
+SQL
+```
+
+Duplicates are intentional for this example. The future pipeline will own
+deduplication and preprocessing.
+
+## 4. Submit the batch prediction job
+
+This example uses one L4 GPU and writes predictions back to the test dataset:
 
 ```bash
 curl --fail-with-body --silent --show-error \
@@ -98,19 +96,15 @@ curl --fail-with-body --silent --show-error \
   "https://$LOCATION-aiplatform.googleapis.com/v1/projects/$PROJECT_ID/locations/$LOCATION/batchPredictionJobs" \
   --data-binary @- <<JSON
 {
-  "displayName": "$RUN_ID-legacy",
+  "displayName": "$RUN_ID",
   "model": "$MODEL_RESOURCE_NAME",
   "inputConfig": {
     "instancesFormat": "bigquery",
-    "bigquerySource": {
-      "inputUri": "bq://$PROJECT_ID.$SMOKE_DATASET.legacy_input"
-    }
+    "bigquerySource": {"inputUri": "bq://$PROJECT_ID.$DATASET.input"}
   },
   "outputConfig": {
     "predictionsFormat": "bigquery",
-    "bigqueryDestination": {
-      "outputUri": "bq://$PROJECT_ID.$SMOKE_DATASET"
-    }
+    "bigqueryDestination": {"outputUri": "bq://$PROJECT_ID.$DATASET"}
   },
   "dedicatedResources": {
     "machineSpec": {
@@ -127,120 +121,58 @@ curl --fail-with-body --silent --show-error \
 JSON
 ```
 
-Copy the returned job `name`. Inspect it in the Vertex batch-prediction
-console, or repeat this read-only request as needed:
+Save the returned job `name`. This submits the job; it does not wait for it.
 
-```bash
-export JOB_NAME=projects/REPLACE_PROJECT/locations/us-central1/batchPredictionJobs/REPLACE_JOB_ID
-curl --fail-with-body --silent --show-error \
-  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-  "https://$LOCATION-aiplatform.googleapis.com/v1/$JOB_NAME"
-```
+## 5. Check the job and predictions
 
-Require `JOB_STATE_SUCCEEDED`, inspect `completionStats`, `partialFailures`,
-and `error`, and record `outputInfo.bigqueryOutputDataset` and
-`outputInfo.bigqueryOutputTable`. A succeeded job alone does not establish
-complete predictions. Inspect container logs for startup/readiness problems,
-CUDA/BF16 errors, OOM, and HTTP failures.
-Require the readiness log to report `torch.bfloat16` and a sequence limit no
-greater than 2,048 tokens. This logs configuration only, not source text.
+Open **Vertex AI > Batch predictions**, select the job, and wait for success.
+Check for partial failures as well: a successful job can still have missing
+predictions.
 
-The single L4 replica is a smoke-test override, not a production scaling
-decision. A nine-row job also tests a partial request smaller than batch size
-32. It does not benchmark throughput or prove large-request microbatching.
+In the container logs, look for `dtype=torch.bfloat16` and a sequence limit
+of at most **2,048 tokens**, not bytes. In the job details, find the actual
+BigQuery output table; do not guess its generated name.
 
-## 5. Check the actual output schema and results
-
-Set `PREDICTION_TABLE` to the actual fully qualified prediction table reported
-by Vertex, without the `bq://` prefix. Do not assume a generated table name.
+Set that table below without the `bq://` prefix:
 
 ```bash
 export PREDICTION_TABLE=REPLACE_PROJECT.REPLACE_DATASET.REPLACE_TABLE
 bq show --schema --format=prettyjson "$PREDICTION_TABLE"
-```
 
-The query below uses the copied workflow's `instances`/`prediction` JSON
-contract. If Vertex produces a different physical schema, inspect it and
-resolve that integration mismatch before proceeding; do not silently discard
-text keys or rely on row order.
-
-```bash
-bq --project_id="$PROJECT_ID" --location="$BQ_LOCATION" query --use_legacy_sql=false <<SQL
-CREATE TEMP TABLE checked AS
+bq --project_id="$PROJECT_ID" --location=US query --use_legacy_sql=false <<SQL
+WITH results AS (
+  SELECT
+    JSON_VALUE(instances, '$.text') AS text,
+    JSON_EXTRACT_ARRAY(prediction) AS elements
+  FROM \`$PREDICTION_TABLE\`
+)
 SELECT
-  JSON_VALUE(instances, '$.text') AS text,
-  JSON_EXTRACT_ARRAY(prediction) AS elements
-FROM \`$PREDICTION_TABLE\`;
-
-ASSERT (SELECT COUNT(*) FROM checked) = 9 AS 'Expected nine predictions';
-ASSERT NOT EXISTS (
-  SELECT 1 FROM checked
-  WHERE text IS NULL OR elements IS NULL OR ARRAY_LENGTH(elements) != 768
-    OR EXISTS (
+  COUNT(*) AS predictions,
+  COUNTIF(
+    text IS NOT NULL AND ARRAY_LENGTH(elements) = 768
+    AND NOT EXISTS (
       SELECT 1 FROM UNNEST(elements) AS element
       WHERE SAFE_CAST(element AS FLOAT64) IS NULL
          OR IS_NAN(SAFE_CAST(element AS FLOAT64))
          OR IS_INF(SAFE_CAST(element AS FLOAT64))
     )
-) AS 'Expected preserved text and finite 768-dimensional vectors';
-
-ASSERT NOT EXISTS (
-  SELECT 1 FROM checked
-  WHERE ABS(SQRT((
-    SELECT SUM(POW(CAST(element AS FLOAT64), 2))
-    FROM UNNEST(elements) AS element
-  )) - 1.0) > 0.02
-) AS 'Expected approximately normalized encoder vectors';
-
-ASSERT NOT EXISTS (
-  SELECT 1 FROM
-    (SELECT COALESCE(text, '') AS text, COUNT(*) AS expected
-     FROM \`$PROJECT_ID.$SMOKE_DATASET.source\` GROUP BY 1)
-  FULL JOIN
-    (SELECT text, COUNT(*) AS actual FROM checked GROUP BY 1)
-  USING (text)
-  WHERE COALESCE(expected, 0) != COALESCE(actual, 0)
-) AS 'Original text keys and duplicate multiplicity must be preserved';
-
-SELECT COUNT(*) AS validated_predictions FROM checked;
+  ) AS valid_predictions
+FROM results;
 SQL
 ```
 
-The encoder norm tolerance allows BF16 rounding; the architecture's tighter
-`1e-4` norm requirement applies to the FP32 projection output, not this test.
-Compare the two oversized-text vectors: they should be approximately equal
-because their retained token prefixes match. Confirm the saved artifact's
-tokenizer limit and training convention; numerical comparisons alone do not
-prove exact special-token handling.
+Expect **6 predictions and 6 valid predictions**. Confirm that the original
+text keys and duplicate counts are preserved; never join by output row order.
+The query uses the copied workflow's `instances`/`prediction` schema. If the
+actual schema differs, resolve that mismatch before proceeding.
 
-## 6. Verify named-field input separately
+## After the first successful run
 
-Repeat step 4 with display name `$RUN_ID-object`, input URI ending in
-`.object_input`, and this additional top-level field:
+Before adopting named-field input, repeat with a table containing a `text`
+column and add `"instanceConfig": {"instanceType": "object"}` to the job
+request. Verify preserved text keys and complete predictions again.
 
-```json
-"instanceConfig": {"instanceType": "object"}
-```
-
-Repeat steps 4-5 for that job's own output table. Both formats must pass.
-Do not replace the proven serialized input path until the named-field path is
-verified.
-
-## 7. Record results and inspect failures
-
-Record image tag/digest, model resource, artifact version, both job names,
-output schemas, row counts, and any errors. This verifies BigQuery
-compatibility and basic inference, not recommendation quality or the complete
-two-tower pipeline. Compare against training-generated vectors before
-production use, particularly because prompt behavior and precision changed.
-
-For a separate optional negative job, create a new input table containing
-`{"text":123}` in its serialized `instances` column. Expect failed prediction
-records, no fabricated vector, and no input text echoed by the predictor.
-Inspect actual Vertex error tables/request retry behavior. An invalid row may
-fail its entire request; pipeline isolation/retries are not implemented yet.
-
-No automatic cleanup is included. Retain the smoke resources until results
-are reconciled; then remove only the explicitly recorded test model, test
-tables/dataset, and test image according to your retention policy. Cancelling
-a client command does not cancel an already submitted Vertex job.
+This smoke test checks basic inference and BigQuery integration, not the full
+pipeline or training compatibility. Compare against training-generated vectors
+before production use. Keep the test resources until results are reconciled,
+then remove only the test resources created by this run.

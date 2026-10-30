@@ -106,9 +106,9 @@ def compile_and_submit(project_id, location, compile_only=False):
         project_id=project_id,
         location=location,
         model_resource_name=os.getenv("MODEL_RESOURCE_NAME", ""),
-        model_display_name=os.getenv("MODEL_DISPLAY_NAME", "embeddinggemma-300m-tei"),
+        model_display_name=os.getenv("MODEL_DISPLAY_NAME", "embeddinggemma-300m-bf16"),
         model_artifact_uri=os.getenv("MODEL_ARTIFACT_URI", "gs://wx-e1710759-2e30-40b2-a876-11588a57cb50/text-embedding-models/embeddinggemma-300m"),
-        serving_container_image_uri=os.getenv("SERVING_CONTAINER_IMAGE_URI", "gcr.io/gcp-wow-rwds-ai-super-plo-dev/text-embedding-batch-prediction"),
+        serving_container_image_uri=os.getenv("SERVING_CONTAINER_IMAGE_URI", "gcr.io/gcp-wow-rwds-ai-super-plo-dev/embeddinggemma-300m-bf16"),
         truncate_dim=os.getenv("TRUNCATE_DIM", "")
     )
     

@@ -33,7 +33,7 @@ The target configuration uses the following Google Cloud resources:
 | Google Cloud project | `gcp-wow-rwds-ai-super-plo-dev` |
 | Vertex AI location | `us-central1` |
 | Model artifact location | `gs://wx-e1710759-2e30-40b2-a876-11588a57cb50/text-embedding-models/embeddinggemma-300m` |
-| Serving image | `gcr.io/gcp-wow-rwds-ai-super-plo-dev/text-embedding-batch-prediction` |
+| Serving image | `gcr.io/gcp-wow-rwds-ai-super-plo-dev/embeddinggemma-300m-bf16` |
 | Input table | `gcp-wow-rwds-ai-super-plo-dev.two_tower.test_input_embeddings` |
 | Output dataset | `gcp-wow-rwds-ai-super-plo-dev.two_tower` |
 
@@ -100,7 +100,7 @@ make push
 The published image is:
 
 ```text
-gcr.io/gcp-wow-rwds-ai-super-plo-dev/text-embedding-batch-prediction
+gcr.io/gcp-wow-rwds-ai-super-plo-dev/embeddinggemma-300m-bf16
 ```
 
 ### 4. Register the Vertex AI model
@@ -112,7 +112,7 @@ model artifact location with the serving container and configures:
 
 | Configuration | Value |
 | --- | --- |
-| Display name | `embeddinggemma-300m-tei` |
+| Display name | `embeddinggemma-300m-bf16` |
 | Prediction route | `/predict` |
 | Health route | `/health` |
 | Container port | `8080` |

@@ -140,11 +140,13 @@ Each batch image exposes Vertex-compatible HTTP prediction and health routes. Ea
 replica loads its stage's model artifacts once and reports readiness only when
 ready to serve. Use `eval()` and inference/no-gradient mode.
 
-EmbeddingGemma and its tokenizer/configuration are assumed to exist at:
+EmbeddingGemma-300m and its tokenizer/configuration have been uploaded to:
 
 ```text
-gs://wx-1b759ae5-bd00-4de8-bf4d-427baa30e931/fs/text-embedding-models/embeddinggemma-300m/
+gs://wx-e1710759-2e30-40b2-a876-11588a57cb50/text-embedding-models/embeddinggemma-300m
 ```
+
+Use `embeddinggemma-300m-bf16` as the Vertex AI Model Registry display name.
 
 Pipeline components and Vertex jobs require appropriate BigQuery access;
 model containers require access to their own artifacts.

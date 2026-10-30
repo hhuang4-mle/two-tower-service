@@ -1,10 +1,38 @@
 # Copied text-embedding migration plan
 
-Status: initial contracts and predictor changes implemented; Vertex smoke
-validation pending. This plan remains separate from the copied project's
-documentation. Full-pipeline migration and Cloud Run cutover remain deferred.
-The predictor is now isolated in `batch_text_embedding/`; copied workflow
-material is preserved under `pipeline/legacy/`.
+Status: the standalone text-embedding implementation and Vertex AI batch
+smoke test are complete. The user reported a successful test on 2026-10-30.
+Full-pipeline implementation and Cloud Run cutover are not complete.
+
+## Progress and next milestone
+
+| Step | Status | Remaining work |
+|---|---|---|
+| 1. Contracts and configuration | Partially complete | Logical contracts defined and serialized BigQuery smoke path validated; confirm real customer/product schemas, physical projection/failure schemas, and pipeline configuration. |
+| 2. Inference-only text embedding | Complete for the initial milestone | Independent image, model registration, and BigQuery-to-BigQuery Vertex smoke test successful. |
+| 3. Pipeline preprocessing | Next | Implement source normalization/deduplication and staging SQL, followed by projection-input assembly. |
+| 4. Full Vertex AI Pipeline | Not started | Implement orchestration and integrate both model stages. |
+| 5. Postprocessing and failures | Not started | Implement reconciliation, selective retries, failure mapping, publication, and cleanup. |
+| 6. End-to-end validation | Partially complete | Standalone encoder smoke test passed; full customer/product pipelines and failure paths remain unvalidated. |
+| 7. Cutover | Partially complete | Directory separation and build paths complete; replace and retire legacy execution only after full-pipeline validation. |
+
+**Start next with Step 3**, first resolving the source/staging details still
+open in Step 1:
+
+1. Confirm real customer/product table names, identifier types, text columns,
+   BigQuery locations, and staging/output configuration.
+2. Implement BigQuery preprocessing under `pipeline/sql/`: normalize NULL
+   texts, deduplicate across both customer fields within a run, and stage
+   distinct encoder inputs while preserving source-row mappings.
+3. Validate that SQL with small fixtures and connect preparation plus the
+   registered encoder to an initial Vertex AI Pipeline.
+4. Add projection-input assembly and the remaining stages as the independent
+   projection image and checkpoint loader become available.
+
+The projection service is still a placeholder. Implementing its supplied
+two-tower head, fail-closed checkpoint loading, and independent image is a
+prerequisite for completing Steps 4 and 6. Confirm trained-checkpoint
+availability before production integration.
 
 ## Goal and boundaries
 
@@ -42,10 +70,14 @@ so their relative imports and runner build context are preserved.
 
 ### 1. Define pipeline contracts and configuration
 
+Status: partially complete.
+
 Initial contracts are in
-[`batch_text_embedding/README.md`](batch_text_embedding/README.md). Physical
-Vertex/BigQuery schemas, identifier types, resources, and IAM still require
-deployment verification.
+[`batch_text_embedding/README.md`](batch_text_embedding/README.md). The smoke
+test has validated the standalone serialized BigQuery input/output path in
+Vertex. Real customer/product schemas, identifier types, physical projection
+and failure schemas, and full-pipeline resources/IAM remain to be confirmed;
+the smoke result does not verify every production configuration.
 
 Specify customer and product source schemas, staging tables, prediction/error
 schemas, and final publication mechanics before moving workflow logic.
@@ -62,36 +94,42 @@ service accounts, and IAM rather than inheriting copied defaults.
 
 ### 2. Make text embedding an inference-only application
 
-Retain artifact loading, readiness, prediction-request validation,
-tokenization, and model inference in `batch_text_embedding/`. Do not move these
-model-local operations into BigQuery preprocessing.
+Status: complete for the initial standalone encoder milestone.
 
-Keep BigQuery preparation, deduplication, source-row reconstruction, batch-job
-submission/polling, publication, and cleanup outside the text-embedding image.
-Organize those responsibilities with the future full pipeline, outside the
-text-embedding application.
+The predictor is isolated in `batch_text_embedding/`, with its own Dockerfile,
+dependencies, Cloud Build configuration, and build/push commands. It owns
+artifact loading, readiness, request validation, tokenization, and inference.
+Preprocessing, joins, submission/polling, publication, and cleanup remain
+outside the image. Copied orchestration is preserved in `pipeline/legacy/`.
 
-Audit the copied predictor against the target model contract before reuse:
-768-dimensional outputs, the complete saved Sentence Transformers artifact,
-no added prompt, retained `normalize_embeddings=True`, BF16 encoder inference,
-and FP32 vectors for projection. Review the current `encode_document`,
-`normalize_embeddings`, and `TRUNCATE_DIM` behavior rather than assuming it
-matches training. As agreed, truncate oversized inputs with the saved
-tokenizer to at most 2,048 tokens including special tokens; retain original
-text join keys. Assume 768 dimensions for the pipeline without rejecting
-other predictor dimension options.
+Implemented behavior: complete saved Sentence Transformers artifact loading,
+BF16 CUDA inference, FP32 output, no added prompt, retained
+`normalize_embeddings=True`, and right truncation at at most 2,048 tokens
+including special tokens. Original text remains the join key. The pipeline
+assumes 768 dimensions without rejecting other predictor dimension options.
+Existing BigQuery-compatible request formats and response schema are retained.
 
-The existing predictor has been updated accordingly without changing its
-BigQuery-compatible request formats or response schema. Cloud-only validation
-is documented in
-[`VERTEX_SMOKE_TEST.md`](batch_text_embedding/VERTEX_SMOKE_TEST.md)
-for the user to run; no smoke jobs have been submitted.
+The uploaded artifact is
+`gs://wx-e1710759-2e30-40b2-a876-11588a57cb50/text-embedding-models/embeddinggemma-300m`.
+The image repository is
+`gcr.io/gcp-wow-rwds-ai-super-plo-dev/embeddinggemma-300m-bf16`;
+the Vertex registry display name is `embeddinggemma-300m-bf16`.
+
+The user successfully ran
+[`VERTEX_SMOKE_TEST.md`](batch_text_embedding/VERTEX_SMOKE_TEST.md) on
+2026-10-30, validating the standalone BigQuery -> Vertex inference -> BigQuery
+flow. Exact image digest/tag, model resource, job name, and output table were
+not recorded in this plan. This is not full-pipeline, performance, or
+training-vector quality acceptance.
 
 ### 3. Adapt preprocessing into explicit pipeline steps
 
+Status: next; not implemented.
+
 Reuse compatible logic from `preprocess_input()` and
-`pipeline/legacy/vertex_pipeline/sql/preprocess.sql` rather than maintaining two independent
-implementations.
+`pipeline/legacy/vertex_pipeline/sql/preprocess.sql` rather than maintaining
+two independent implementations. Put the new SQL under `pipeline/sql/`,
+outside the predictor and legacy directories.
 
 Prepare distinct text inputs in BigQuery before starting the encoder job.
 After reconciling encoder predictions, construct distinct ordered customer
@@ -99,6 +137,9 @@ embedding pairs or product embedding inputs for the projection job.
 Keep the empty-text embedding convention; do not substitute zero vectors.
 
 ### 4. Construct the full Vertex AI Pipeline
+
+Status: not started; `pipeline/README.md` is a placeholder for the new
+implementation. The preserved text-only legacy graph is not this pipeline.
 
 Adapt the copied text-only graph into a full pipeline with separately visible
 steps:
@@ -117,7 +158,9 @@ Use managed BigQuery and Vertex components where suitable; do not introduce a
 fourth application image or put orchestration in the API.
 
 Use named-field Vertex inputs and retain text keys in prediction outputs.
-Confirm actual output/error schemas rather than relying on output row order.
+The serialized encoder path passed the smoke test. Separately verify
+named-field input and the projection/error schemas as they are integrated;
+do not infer those results from the encoder smoke test or rely on row order.
 Align copied compute settings with the architecture: initially four
 `g2-standard-4` replicas with one L4 each and a maximum of four; text request
 batch size 32, with projection batch size benchmarked separately.
@@ -131,9 +174,11 @@ names could otherwise reuse stale results.
 
 ### 5. Adapt postprocessing and failure handling
 
+Status: not started.
+
 Reuse compatible validation and join logic from `postprocess_output()` and
-`pipeline/legacy/vertex_pipeline/sql/postprocess.sql`, but do not copy the existing
-`embedding = []` publication behavior into the final output contract.
+`pipeline/legacy/vertex_pipeline/sql/postprocess.sql`, but do not copy the
+existing `embedding = []` publication behavior into the final output contract.
 
 Validate finite 768-dimensional intermediate vectors. Validate final vectors
 as finite, 128-dimensional, and unit length within `1e-4`; exclude zero or
@@ -152,10 +197,15 @@ Avoid logging raw customer text.
 
 ### 6. Validate before replacing the current entry point
 
-Add focused tests for deduplication, NULL/empty/whitespace text, ordered
-customer pairs, duplicate source rows, invalid vectors, missing predictions,
-retry limits, and empty inputs. Verify the predictor can run without the
-workflow runner and each batch image loads only its own model.
+Status: partially complete. The standalone encoder's Vertex smoke test passed.
+Full-pipeline validation, projection integration, named-field input, and
+negative/error-path results are not established by that report.
+
+Add focused SQL checks and cloud validation for deduplication,
+NULL/empty/whitespace text, ordered customer pairs, duplicate source rows,
+invalid vectors, missing predictions, retry limits, and empty inputs. Keep
+model validation on Vertex; no local model downloads are required. Verify
+each batch image loads only its own model.
 
 Compile the new pipeline and run small customer-only and product-only
 end-to-end jobs to confirm BigQuery schemas, job dependencies, visible step
@@ -167,6 +217,11 @@ checkpoint must prevent production projection readiness and prediction.
 Do not treat successful encoder execution as full-pipeline acceptance.
 
 ### 7. Cut over commands and documentation
+
+Status: partially complete. Predictor/legacy directory separation, independent
+build commands, and updated paths/documentation are done. The Cloud Run runner
+and old workflow remain available under `pipeline/legacy/`; final execution
+cutover and retirement are pending.
 
 Only after validation, provide full-pipeline compile/submit commands and
 update the active documentation. Retain the text-embedding image's independent

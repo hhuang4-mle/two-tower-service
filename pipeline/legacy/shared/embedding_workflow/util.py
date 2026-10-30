@@ -17,14 +17,14 @@ from google.cloud import bigquery
 DEFAULT_PROJECT_ID = "gcp-wow-rwds-ai-super-plo-dev"
 DEFAULT_LOCATION = "us-central1"
 DEFAULT_DATASET = "two_tower"
-DEFAULT_MODEL_DISPLAY_NAME = "embeddinggemma-300m-tei"
+DEFAULT_MODEL_DISPLAY_NAME = "embeddinggemma-300m-bf16"
 DEFAULT_MODEL_ARTIFACT_URI = (
     "gs://wx-e1710759-2e30-40b2-a876-11588a57cb50/"
     "text-embedding-models/embeddinggemma-300m"
 )
 DEFAULT_SERVING_CONTAINER_IMAGE_URI = (
     "gcr.io/gcp-wow-rwds-ai-super-plo-dev/"
-    "text-embedding-batch-prediction"
+    "embeddinggemma-300m-bf16"
 )
 IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 LOGGER = logging.getLogger(__name__)

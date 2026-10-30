@@ -14,6 +14,10 @@ Cloud Build configuration, and these documents. Run `make build` or
 `make push` from this directory. Override `PROJECT_ID`, `IMAGE_NAME`, or
 `IMAGE_TAG` as needed.
 
+The default image repository is
+`gcr.io/gcp-wow-rwds-ai-super-plo-dev/embeddinggemma-300m-bf16`.
+Build/push defaults to the `latest` tag; the smoke procedure uses a unique tag.
+
 The full pipeline will be implemented in [`pipeline/`](../pipeline/README.md).
 Legacy execution commands now run from `pipeline/legacy/`, not here.
 
@@ -139,11 +143,11 @@ reconciliation. Disable data-dependent caching for mutable tables.
 | `AIP_STORAGE_URI` | Vertex-provided GCS saved-artifact prefix. |
 | `ENCODER_BATCH_SIZE` | Positive microbatch limit, default 32; separate from Vertex request batching. |
 | `TRUNCATE_DIM` | Positive default output dimension truncation, default 768. |
-| Model registration | `/predict`, `/health`, port 8080, explicit artifact and image versions. |
+| Model registration | Display name `embeddinggemma-300m-bf16`; `/predict`, `/health`, port 8080, explicit artifact and image versions. |
 | Future pipeline | Explicit project, Vertex region, compatible BigQuery location, table names, separate encoder/projection model resources, pipeline root, and execution service account. |
 
-The architecture's intended artifact is
-`gs://wx-1b759ae5-bd00-4de8-bf4d-427baa30e931/fs/text-embedding-models/embeddinggemma-300m/`.
-The copied registration tooling has different defaults; supply overrides until
-it is migrated. Resource existence, IAM, dataset locations, physical output
-schemas, and training compatibility remain cloud verification prerequisites.
+The uploaded EmbeddingGemma-300m artifact is
+`gs://wx-e1710759-2e30-40b2-a876-11588a57cb50/text-embedding-models/embeddinggemma-300m`.
+This matches the copied registration tooling's default artifact URI.
+Artifact completeness, IAM, dataset locations, physical output schemas, and
+training compatibility remain cloud verification prerequisites.
